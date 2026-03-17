@@ -1,5 +1,5 @@
 ************************************************************************
-*                DOSE-RF Code, Mollie Payne, 18/09/2024                  *
+*                DOSE-RF Code, Mollie Payne, 17/03/2026                *
 ************************************************************************
 clear
 
@@ -21,64 +21,115 @@ global d "" //Treatment Variable
 
 tab $s
 global m "" //Maximum number of sessions
-
+set seed . //Pick seed number
+local B = . //Numer of bootstrap interations
 
 ************************************************************************
 * Step Three: Random Forest
 * Run the code below. Numvars() should be the square route of the number of variables in your x_r list. If you specify 4 predictors of dose, change numvars to 2. You can change the number of iterations if you wish, this is the number of trees in the forest. 
 ************************************************************************
 
-rforest $s $x_r if $d == 1, type(class) iterations(200) numvars(5)
-predict dosehat
+di "Running random forest on original data"
+rforest $s $x_r if $d == 1, type(class) iterations(1000) numvars(5)
+predict dosehat_og
 
 ************************************************************************
-* Step Four: Set up matrix
+* Step Four: Set up matrix and ger original estimates before bootrap. 
 * This is where your results will be stored. There are three rows, one for the coefficient, the lower 95% CI and the upper 95% CI. Each column represents a session. The number of columns should be the same as 'm'.
 ************************************************************************
  matrix result = J(3, $m, .)
- matrix rownames result = beta ll95 ul95
- matrix colnames result = 1 2 3 4 5 6 7 8 9 10 
+forval i = 1/$m {
+		capture regress $y $d $x_y if dosehat == `i'
+		if _rc == 0 matrix result[1,`i'] = _b[$d]
+	}
+drop dosthat_og
 
 
 ************************************************************************
-* Step Five: Run analysis. 
-* Simply run the code below, all results will be stored in a matrix and printed after 'matrix list result'
+* Step Five: Set up postfile for bootstrap
 ************************************************************************
-        * Loop through the regressions
-        forval i = 1/$m {
-			count if dosehat == `i'
-			if r(N)>1 {
-            * Run the regression
-            capture regress $y $d $x_y if dosehat == `i'
-			scalar b`i' = _b[$d]
-			scalar se`i' = _se[$d]
-            * Store the coefficients in the matrix
-           matrix result[1,`i'] = _b[$d]
+tempfile bootresults
+capture postclose handle
+postfile handle dose iter beta using `bootresults', replace
 
-            * Store the lower CI limit in the matrix
-           matrix result[2,`i'] = _b[$d] - 1.96 * _se[$d]
+************************************************************************
+* Step Six: Bootstrap loop
+************************************************************************
 
-            * Store the upper CI limit in the matrix
-           matrix result[3,`i'] = _b[$d] + 1.96 * _se[$d]
+forval b = 1/`B'{
+	if mod(`b',50) == 0 display "Bootstrap interation `b' of `B'"
+
+	preserve
+	bsample
+
+	*Random forest on bootstrap sample
+	capture drop dosehat
+	rforst $s $x_r if $d == 1, type(class) iterations(1000) numvars(5)
+	predict dosehat
+
+	*Get treatment effects for each dose
+	forval i = 1/$m {
+		count if dosehat == `i'
+
+		if r(N) > 1 {
+			capture regress $y $d $x_y if dosehat == `i'
+
+		if _rc == 0 {
+			post handle (`i') (`b') (_b[$d])
 			}
-			else {
-				// Insufficient observations, store missing values in the matrix
-			scalar b`i' = .
-			scalar se`i' = .
-			}
+		else {
+			post handle (`i') (`b') (.)
 		}
-		
-matrix list result
+	}
+	else {
+		post handle (`i') (`b') (.)
+		}
+	}
 
+ restore
+}
+postclose handle
+************************************************************************
+* Step Seven: Load and process bootstrap results
+************************************************************************
+use `bootresults', clear
+
+*Compute 95% confidence intervals
+bysort dose: egen ll95 = pctile(beta), p(2.5)
+bysort dose: egen ul95 = pctile(beta, p(97.5)
+
+bysort dose: keep if _n == 1
+sort dose
 
 ************************************************************************
-* Step Six: View results in graph. 
-* This command plots the values within the matrix. You can change ylabel(a(b)c) to edit the y axis, where a is the lower limit, c is the upper limit and b is the scale for the the tick labels
+* Step Eight: Create final matrix
+This is where your results will be stored. Three rows: coefficient, 
+lower 95% CI, upper 95% CI Each column represents a dose level.
 ************************************************************************
+mkmat ll95, matrix(ll95_row)
+mkmat ul95, matrix(ul95_row)
+matrix ll95_row = ll95_row'
+matrix ul95_row = ul95_row'
 
-coefplot matrix(result), ci((2 3)) vert ylabel(-6(1)1) yline(0) ytitle(Treatment Effect) title(Causal Treatment Effect at Each Session) xtitle(Session) name(coefplot_TE, replace) 
+matrix final = (orig \ ll95_row \ ul95_row)
+matrix rownames final = beta ll95 ul95
+matrix colnames final = 1 2 3 4 5
+
+matrix list final
 
 ************************************************************************
-* End of File :) 
+* Step Nine: View results in graph
+This command plots the values within the matrix. Adjust ylabel() as needed.
+************************************************************************
+coefplot matrix(final), ci((2 3)) vert ///
+    ylabel(-10(2)2) ///
+    yline(0) ///
+    ytitle("Treatment Effect") ///
+    title("Causal Treatment Effect at Each Dose Level") ///
+    xtitle("Dose") ///
+    name(coefplot_TE, replace)
+
+************************************************************************
+di "End of file"
 
 
